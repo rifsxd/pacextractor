@@ -1,4 +1,3 @@
-
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -8,6 +7,8 @@
 #include <unistd.h>
 #include <stdint.h>
 #include <sys/stat.h>
+
+#define VERSION "1.0.0"
 
 typedef struct {
     int16_t someField[24];
@@ -27,114 +28,236 @@ typedef struct {
     int16_t partitionName[256];
     int16_t fileName[512];
     uint32_t partitionSize;
-    int32_t someFileds1[2];
+    int32_t someFields1[2];
     uint32_t partitionAddrInPac;
-    int32_t someFileds2[3];
+    int32_t someFields2[3];
     int32_t dataArray[];
 } PartitionHeader;
 
-void getString(int16_t* baseString, char* resString) {
-    if(*baseString == 0) {
-        *resString = 0;
+static void getString(const int16_t* baseString, char* resString) {
+    if (baseString == NULL || resString == NULL) {
+        *resString = '\0';
         return;
     }
-    int length = 0;
-    do {
-        *resString = 0xFF & *baseString;
-        resString++;
+
+    while (*baseString) {
+        *resString++ = (char)(*baseString & 0xFF);
         baseString++;
-        if(++length > 256)
+        if (resString - resString > 255) { // Prevent buffer overflow
             break;
-    } while(baseString > 0);
-    *resString = 0;
+        }
+    }
+    *resString = '\0'; // Null-terminate the result string
+}
+
+static void printUsage(void) {
+    printf("Usage: pacextractor <firmware name>.pac <output path>\n");
+    printf("Options:\n");
+    printf("  -h               Show this help message and exit\n");
+    printf("  -v               Show version information and exit\n");
+}
+
+static void printUsageAndExit(void) {
+    printUsage();
+    exit(EXIT_FAILURE);
+}
+
+static void handleOpenFileError(const char* fileName) {
+    perror(fileName);
+    exit(EXIT_FAILURE);
+}
+
+static int openFirmwareFile(const char* filePath) {
+    int fd = open(filePath, O_RDONLY);
+    if (fd == -1) {
+        handleOpenFileError(filePath);
+    }
+    return fd;
+}
+
+static void createOutputDirectory(const char* path) {
+    if (access(path, F_OK) == -1) {
+        if (mkdir(path, 0777) == -1) {
+            perror("Failed to create output directory");
+            exit(EXIT_FAILURE);
+        }
+        printf("Created output directory: %s\n", path);
+    }
+}
+
+static PacHeader readPacHeader(int fd) {
+    PacHeader header;
+    if (read(fd, &header, sizeof(PacHeader)) != sizeof(PacHeader)) {
+        perror("Error while reading PAC header");
+        exit(EXIT_FAILURE);
+    }
+    return header;
+}
+
+static PartitionHeader* readPartitionHeader(int fd, uint32_t* curPos) {
+    lseek(fd, *curPos, SEEK_SET);
+    uint32_t length;
+    if (read(fd, &length, sizeof(length)) != sizeof(length)) {
+        perror("Error while reading partition header length");
+        exit(EXIT_FAILURE);
+    }
+    
+    PartitionHeader* header = malloc(length);
+    if (header == NULL) {
+        perror("Memory allocation failed");
+        exit(EXIT_FAILURE);
+    }
+    
+    lseek(fd, *curPos, SEEK_SET);
+    if (read(fd, header, length) != length) {
+        perror("Error while reading partition header");
+        free(header);
+        exit(EXIT_FAILURE);
+    }
+    
+    *curPos += length;
+    return header;
+}
+
+static void printProgressBar(uint32_t completed, uint32_t total) {
+    const int barWidth = 50;
+    float progress = (float)completed / total;
+    int pos = barWidth * progress;
+
+    printf("\r[");
+    for (int i = 0; i < barWidth; ++i) {
+        if (i < pos) printf("=");
+        else if (i == pos) printf(">");
+        else printf(" ");
+    }
+    printf("] %.2f%%", progress * 100.0);
+    fflush(stdout);
+}
+
+static void extractPartition(int fd, const PartitionHeader* partHeader, const char* outputPath) {
+    if (partHeader->partitionSize == 0) {
+        return;
+    }
+
+    lseek(fd, partHeader->partitionAddrInPac, SEEK_SET);
+
+    // Increase buffer size for faster I/O operations
+    const size_t BUFFER_SIZE = 256 * 1024; // 256 KB
+    char* buffer = malloc(BUFFER_SIZE);
+    if (buffer == NULL) {
+        perror("Memory allocation failed");
+        exit(EXIT_FAILURE);
+    }
+
+    char outputFilePath[768];
+    char fileName[512];
+    getString(partHeader->fileName, fileName);
+    snprintf(outputFilePath, sizeof(outputFilePath), "%s/%s", outputPath, fileName);
+
+    if (remove(outputFilePath) == -1 && errno != ENOENT) {
+        perror("Error removing existing output file");
+        free(buffer);
+        exit(EXIT_FAILURE);
+    }
+
+    int fd_new = open(outputFilePath, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (fd_new == -1) {
+        perror("Error creating output file");
+        free(buffer);
+        exit(EXIT_FAILURE);
+    }
+
+    printf("Extracting to %s\n", outputFilePath);
+
+    uint32_t dataSizeLeft = partHeader->partitionSize;
+    uint32_t dataSizeRead = 0;
+
+    while (dataSizeLeft > 0) {
+        uint32_t copyLength = (dataSizeLeft > BUFFER_SIZE) ? BUFFER_SIZE : dataSizeLeft;
+        ssize_t rb = read(fd, buffer, copyLength);
+        if (rb != copyLength) {
+            perror("Error while reading partition data");
+            close(fd_new);
+            free(buffer);
+            exit(EXIT_FAILURE);
+        }
+        ssize_t wb = write(fd_new, buffer, copyLength);
+        if (wb != copyLength) {
+            perror("Error while writing partition data");
+            close(fd_new);
+            free(buffer);
+            exit(EXIT_FAILURE);
+        }
+        dataSizeLeft -= copyLength;
+        dataSizeRead += copyLength;
+        printProgressBar(dataSizeRead, partHeader->partitionSize);
+    }
+    printf("\n");
+    close(fd_new);
+    free(buffer);
 }
 
 int main(int argc, char** argv) {
-    if(argc < 2) {
-        printf("command format:\n   capextractor <firmware name>.pac");
-        exit(EXIT_FAILURE);
+    if (argc < 2) {
+        printUsageAndExit();
     }
-    
-    int fd = open(argv[1], O_RDONLY);
-    if (fd == -1) {
-        printf("file %s is not find", argv[1]);
-        exit(EXIT_FAILURE);
+
+    if (strcmp(argv[1], "-h") == 0) {
+        printUsage();
+        exit(EXIT_SUCCESS);
+    } else if (strcmp(argv[1], "-v") == 0) {
+        printf("pacextractor version %s\n", VERSION);
+        exit(EXIT_SUCCESS);
     }
+
+    if (argc < 3) {
+        printUsageAndExit();
+    }
+
+    int fd = openFirmwareFile(argv[1]);
     
-//    fseek(fd, 0, SEEK_END);
-//    int firmwareSize = (fd);
-//    fseek(fd, 0, SEEK_SET);
     struct stat st;
-    stat(argv[1], &st);
-    int firmwareSize = st.st_size;
-    if(firmwareSize < sizeof(PacHeader)) {
-        printf("file %s is not firmware", argv[1]);
+    if (fstat(fd, &st) == -1) {
+        perror("Error getting file stats");
         exit(EXIT_FAILURE);
     }
-    
-    PacHeader pacHeader;
-    size_t rb =read(fd, &pacHeader, sizeof(PacHeader));
-    if(rb <= 0) {
-        printf("Error while parsing PAC header");
+    int firmwareSize = st.st_size;
+    if (firmwareSize < sizeof(PacHeader)) {
+        fprintf(stderr, "file %s is not a valid firmware\n", argv[1]);
+        close(fd);
         exit(EXIT_FAILURE);
     }
 
-    char buffer[256];
-    char buffer1[256];
-    getString(pacHeader.firmwareName, buffer);
-    printf("Firmware name: %s\n", buffer);
-    uint32_t curPos = pacHeader.partitionsListStart;
-    PartitionHeader** partHeaders = malloc(sizeof(PartitionHeader**)*pacHeader.partitionCount);
-    int i;
-    for(i = 0; i < pacHeader.partitionCount; i++) {
-        lseek(fd, curPos, SEEK_SET);
-        uint32_t length;
-        rb =read(fd, &length, sizeof(uint32_t));
-        if(rb <= 0) {
-            printf("Partition header error");
-            exit(EXIT_FAILURE);
-        }
-        partHeaders[i] = malloc(length);
-        lseek(fd, curPos, SEEK_SET);
-        curPos += length;
-        rb =read(fd, partHeaders[i], length);
-        if(rb <= 0) {
-            printf("Partition header error");
-            exit(EXIT_FAILURE);
-        }
-        getString(partHeaders[i]->partitionName, buffer);
-        getString(partHeaders[i]->fileName, buffer1);
-        printf("Partition name: %s\n\twith file name: %s\n\twith size %u\n", buffer, buffer1, partHeaders[i]->partitionSize);
-    }
+    char* outputPath = argv[2];
+    createOutputDirectory(outputPath);
+
+    PacHeader pacHeader = readPacHeader(fd);
     
-    for(i = 0; i < pacHeader.partitionCount; i++) {
-        if(partHeaders[i]->partitionSize == 0) {
-            free(partHeaders[i]);
-            continue;
-        }
-        lseek(fd, partHeaders[i]->partitionAddrInPac, SEEK_SET);
-        getString(partHeaders[i]->fileName, buffer);
-        remove(buffer);
-        int fd_new = open(buffer, O_WRONLY | O_CREAT, 0666);
-        printf("Extract %s\n", buffer);
-        uint32_t dataSizeLeft = partHeaders[i]->partitionSize;
-        while(dataSizeLeft > 0) {
-            uint32_t copyLength = (dataSizeLeft > 256) ? 256 : dataSizeLeft;
-            dataSizeLeft -= copyLength;
-            rb =read(fd, buffer, copyLength);
-            if(rb != copyLength) {
-                printf("Partition image extraction error");
-                exit(EXIT_FAILURE);
-            }
-            rb = write(fd_new, buffer, copyLength);
-            if(rb != copyLength) {
-                printf("Partition image extraction error");
-                exit(EXIT_FAILURE);
-            }
-            printf("\r\t%02d%%", (uint64_t)100 - (uint64_t)100*dataSizeLeft/partHeaders[i]->partitionSize);
-        }
-        printf("\n");
-        close(fd_new);
+    char firmwareName[256];
+    getString(pacHeader.firmwareName, firmwareName);
+    printf("Firmware name: %s\n", firmwareName);
+
+    uint32_t curPos = pacHeader.partitionsListStart;
+    PartitionHeader** partHeaders = malloc(pacHeader.partitionCount * sizeof(PartitionHeader*));
+    if (partHeaders == NULL) {
+        perror("Memory allocation failed for partition headers");
+        close(fd);
+        exit(EXIT_FAILURE);
+    }
+
+    for (int i = 0; i < pacHeader.partitionCount; i++) {
+        partHeaders[i] = readPartitionHeader(fd, &curPos);
+        
+        char partitionName[256];
+        char fileName[512];
+        getString(partHeaders[i]->partitionName, partitionName);
+        getString(partHeaders[i]->fileName, fileName);
+        printf("Partition name: %s\n\twith file name: %s\n\twith size %u\n",
+               partitionName, fileName, partHeaders[i]->partitionSize);
+    }
+
+    for (int i = 0; i < pacHeader.partitionCount; i++) {
+        extractPartition(fd, partHeaders[i], outputPath);
         free(partHeaders[i]);
     }
     free(partHeaders);
