@@ -1,2 +1,4 @@
 *.vscode
 *pacextractor
+*.tar.gz
+*ports
