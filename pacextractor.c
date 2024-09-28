@@ -8,7 +8,7 @@
 #include <stdint.h>
 #include <sys/stat.h>
 
-#define VERSION "1.0.0"
+#define VERSION "1.1.0"
 
 typedef struct {
     int16_t someField[24];
@@ -51,7 +51,7 @@ static void getString(const int16_t* baseString, char* resString) {
 }
 
 static void printUsage(void) {
-    printf("Usage: pacextractor <firmware name>.pac <output path>\n");
+    printf("Usage: pacextractor -e <firmware name>.pac -o <output path>\n");
     printf("Options:\n");
     printf("  -h               Show this help message and exit\n");
     printf("  -v               Show version information and exit\n");
@@ -76,12 +76,25 @@ static int openFirmwareFile(const char* filePath) {
 }
 
 static void createOutputDirectory(const char* path) {
-    if (access(path, F_OK) == -1) {
-        if (mkdir(path, 0777) == -1) {
+    char temp[768];
+    strcpy(temp, path);
+    for (char *p = temp; *p; p++) {
+        if (*p == '/') {
+            *p = 0;  // Temporarily terminate the string
+            if (access(temp, F_OK) == -1) {
+                if (mkdir(temp, 0777) == -1) {
+                    perror("Failed to create output directory");
+                    exit(EXIT_FAILURE);
+                }
+            }
+            *p = '/';  // Restore the string
+        }
+    }
+    if (access(temp, F_OK) == -1) {
+        if (mkdir(temp, 0777) == -1) {
             perror("Failed to create output directory");
             exit(EXIT_FAILURE);
         }
-        printf("Created output directory: %s\n", path);
     }
 }
 
@@ -198,7 +211,7 @@ static void extractPartition(int fd, const PartitionHeader* partHeader, const ch
 }
 
 int main(int argc, char** argv) {
-    if (argc < 2) {
+    if (argc < 5) {
         printUsageAndExit();
     }
 
@@ -208,60 +221,61 @@ int main(int argc, char** argv) {
     } else if (strcmp(argv[1], "-v") == 0) {
         printf("pacextractor version %s\n", VERSION);
         exit(EXIT_SUCCESS);
-    }
+    } else if (strcmp(argv[1], "-e") == 0 && strcmp(argv[3], "-o") == 0) {
+        // Process the extraction
+        int fd = openFirmwareFile(argv[2]);
+        
+        struct stat st;
+        if (fstat(fd, &st) == -1) {
+            perror("Error getting file stats");
+            exit(EXIT_FAILURE);
+        }
+        int firmwareSize = st.st_size;
+        if (firmwareSize < sizeof(PacHeader)) {
+            fprintf(stderr, "File %s is not a valid firmware\n", argv[2]);
+            close(fd);
+            exit(EXIT_FAILURE);
+        }
 
-    if (argc < 3) {
+        char* outputPath = argv[4];
+        createOutputDirectory(outputPath);
+
+        PacHeader pacHeader = readPacHeader(fd);
+        
+        char firmwareName[256];
+        getString(pacHeader.firmwareName, firmwareName);
+        printf("Firmware name: %s\n", firmwareName);
+
+        uint32_t curPos = pacHeader.partitionsListStart;
+        PartitionHeader** partHeaders = malloc(pacHeader.partitionCount * sizeof(PartitionHeader*));
+        if (partHeaders == NULL) {
+            perror("Memory allocation failed for partition headers");
+            close(fd);
+            exit(EXIT_FAILURE);
+        }
+
+        for (int i = 0; i < pacHeader.partitionCount; i++) {
+            partHeaders[i] = readPartitionHeader(fd, &curPos);
+            
+            char partitionName[256];
+            char fileName[512];
+            getString(partHeaders[i]->partitionName, partitionName);
+            getString(partHeaders[i]->fileName, fileName);
+            printf("Partition name: %s\n\twith file name: %s\n\twith size %u\n",
+                   partitionName, fileName, partHeaders[i]->partitionSize);
+        }
+
+        for (int i = 0; i < pacHeader.partitionCount; i++) {
+            extractPartition(fd, partHeaders[i], outputPath);
+            free(partHeaders[i]);
+        }
+        free(partHeaders);
+        close(fd);
+        
+        return EXIT_SUCCESS;
+    } else {
         printUsageAndExit();
     }
 
-    int fd = openFirmwareFile(argv[1]);
-    
-    struct stat st;
-    if (fstat(fd, &st) == -1) {
-        perror("Error getting file stats");
-        exit(EXIT_FAILURE);
-    }
-    int firmwareSize = st.st_size;
-    if (firmwareSize < sizeof(PacHeader)) {
-        fprintf(stderr, "file %s is not a valid firmware\n", argv[1]);
-        close(fd);
-        exit(EXIT_FAILURE);
-    }
-
-    char* outputPath = argv[2];
-    createOutputDirectory(outputPath);
-
-    PacHeader pacHeader = readPacHeader(fd);
-    
-    char firmwareName[256];
-    getString(pacHeader.firmwareName, firmwareName);
-    printf("Firmware name: %s\n", firmwareName);
-
-    uint32_t curPos = pacHeader.partitionsListStart;
-    PartitionHeader** partHeaders = malloc(pacHeader.partitionCount * sizeof(PartitionHeader*));
-    if (partHeaders == NULL) {
-        perror("Memory allocation failed for partition headers");
-        close(fd);
-        exit(EXIT_FAILURE);
-    }
-
-    for (int i = 0; i < pacHeader.partitionCount; i++) {
-        partHeaders[i] = readPartitionHeader(fd, &curPos);
-        
-        char partitionName[256];
-        char fileName[512];
-        getString(partHeaders[i]->partitionName, partitionName);
-        getString(partHeaders[i]->fileName, fileName);
-        printf("Partition name: %s\n\twith file name: %s\n\twith size %u\n",
-               partitionName, fileName, partHeaders[i]->partitionSize);
-    }
-
-    for (int i = 0; i < pacHeader.partitionCount; i++) {
-        extractPartition(fd, partHeaders[i], outputPath);
-        free(partHeaders[i]);
-    }
-    free(partHeaders);
-    close(fd);
-    
     return EXIT_SUCCESS;
 }
