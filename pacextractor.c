@@ -137,13 +137,24 @@ static void printProgressBar(uint32_t completed, uint32_t total) {
     float progress = (float)completed / total;
     int pos = barWidth * progress;
 
-    printf("\r[");
+    // Determine color based on progress
+    const char* color;
+    if (progress < 0.5) {
+        color = "\033[31m"; // Red
+    } else if (progress < 0.8) {
+        color = "\033[33m"; // Yellow
+    } else {
+        color = "\033[32m"; // Green
+    }
+    const char* reset = "\033[0m"; // Reset color
+
+    printf("\r[%s", color);
     for (int i = 0; i < barWidth; ++i) {
         if (i < pos) printf("=");
         else if (i == pos) printf(">");
         else printf(" ");
     }
-    printf("] %.2f%%", progress * 100.0);
+    printf("]%s %.2f%%", reset, progress * 100.0);
     fflush(stdout);
 }
 
